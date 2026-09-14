@@ -1,0 +1,29 @@
+name: braille
+
+services:
+  api:
+    build: .
+    image: braille-api:local
+    environment:
+      PORT: "8080"
+    ports:
+      # Override the host port with API_PORT, e.g. API_PORT=9000 docker compose up api
+      - "${API_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+      start_period: 5s
+
+  # One-shot acceptance suite: runs against the api service and exits.
+  verify:
+    image: braille-api:local
+    build: .
+    command: ["verify"]
+    environment:
+      API_URL: "http://api:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
