@@ -67,6 +67,8 @@ type Error struct {
 	Source      string `json:"source,omitempty"`
 	Length      int    `json:"length,omitempty"`
 	Limit       int    `json:"limit,omitempty"`
+	Min         int    `json:"min,omitempty"`
+	Max         int    `json:"max,omitempty"`
 }
 
 func (e *Error) Error() string { return e.Message }

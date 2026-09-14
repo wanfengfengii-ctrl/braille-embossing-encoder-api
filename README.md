@@ -50,6 +50,46 @@
 
 请求体不是合法 JSON 或 `text` 不是字符串时返回 `400 bad_request`。
 
+### `POST /layout`
+
+排版预览：先完整执行与 `/encode` 相同的编码，再按压印设备行宽把记录装入各行，供印前确认换行效果。
+
+请求：`text` 同上，`cells_per_line` 为每行单元数，须为 2–80 的整数（下限 2 保证最宽的双单元字符——指示符加主体——总能独占一行）。
+
+```json
+{"text": "Ab\n12", "cells_per_line": 2}
+```
+
+成功 `200` 返回 `lines`，每行含从零递增的 `line_index` 与 `items`；`items` 直接复用 `/encode` 的记录结构（含 `source_index`）。
+
+```json
+{"lines":[
+  {"line_index":0,"items":[
+    {"source_index":0,"source":"A","kind":"character","prefix_type":"none","cells":[1]}]},
+  {"line_index":1,"items":[
+    {"source_index":1,"source":"b","kind":"character","prefix_type":"capital","cells":[32,3]},
+    {"source_index":2,"source":"\n","kind":"newline","prefix_type":"none","cells":[]}]},
+  {"line_index":2,"items":[
+    {"source_index":3,"source":"1","kind":"character","prefix_type":"number","cells":[60,1]}]},
+  {"line_index":3,"items":[
+    {"source_index":4,"source":"2","kind":"character","prefix_type":"none","cells":[3]}]}
+]}
+```
+
+装行规则：
+
+- 同一字符的指示符与主体单元不可拆开：放不下的字符整体移到下一行（如上例 `b` 的 `32,3`）。
+- 自动折行不改写任何记录：数字段跨行延续时不补数字指示符，大写指示符与 `source_index` 保持原样（如上例 `2` 仍是 `prefix_type=none, cells=[3]`）。
+- 显式换行立即结束当前行，换行记录作为该行的最后一条；连续或末尾换行保留可见空行（空行 `items` 为 `[]` 或仅含换行记录）。
+
+错误：
+
+| 场景 | 状态码 | code | 说明 |
+| --- | --- | --- | --- |
+| 行宽缺失、非整数或越界 | `422` | `invalid_line_width` | 附带 `min: 2, max: 80` 指出允许范围 |
+| 文本问题（空、超长、非法字符） | `422` | 与 `/encode` 相同 | 编码先行校验，不泄露局部排版结果 |
+| 畸形 JSON、`text` 非字符串 | `400` | `bad_request` | 与 `/encode` 相同 |
+
 ### `GET /healthz`
 
 存活探针，返回 `200 {"status":"ok"}`。
@@ -69,7 +109,7 @@ API_PORT=9000 docker compose up api   # 宿主端口由 API_PORT 覆盖
 docker compose up --exit-code-from verify verify   # 一次性验收：跑完即退出并回传退出码
 ```
 
-`verify` 服务等待 `api` 健康后执行验收套件（编码金样、数字段状态切换、0–9 映射、空文本/超长/非法字符 422、畸形 JSON 400 等），全部通过则以 0 退出，否则非 0。
+`verify` 服务等待 `api` 健康后执行验收套件（编码金样、数字段状态切换、0–9 映射、空文本/超长/非法字符 422、畸形 JSON 400、排版金样、双单元字符临界折行、数字段跨自动行延续、连续/末尾换行空行、行宽 422、响应确定性等），全部通过则以 0 退出，否则非 0。
 
 两个服务由同一个多阶段 Dockerfile 构建：共享的 `build` 阶段编译出两个二进制，`server`/`verify` 两个 target 分别产出 `braille-api:local` 与 `braille-verify:local` 两个独立镜像，并行构建共享缓存且互不覆盖。
 
@@ -78,6 +118,6 @@ docker compose up --exit-code-from verify verify   # 一次性验收：跑完即
 ```
 cmd/server    API 入口（PORT 环境变量，默认 8080）
 cmd/verify    一次性验收客户端（API_URL 环境变量）
-internal/braille  编码核心：校验 + 状态机
+internal/braille  编码核心（校验 + 状态机）与排版装行
 internal/api      Gin 路由与处理器
 ```
