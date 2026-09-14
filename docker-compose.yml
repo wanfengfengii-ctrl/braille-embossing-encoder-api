@@ -2,7 +2,9 @@ name: braille
 
 services:
   api:
-    build: .
+    build:
+      context: .
+      target: server
     image: braille-api:local
     environment:
       PORT: "8080"
@@ -18,9 +20,10 @@ services:
 
   # One-shot acceptance suite: runs against the api service and exits.
   verify:
-    image: braille-api:local
-    build: .
-    command: ["verify"]
+    build:
+      context: .
+      target: verify
+    image: braille-verify:local
     environment:
       API_URL: "http://api:8080"
     depends_on:

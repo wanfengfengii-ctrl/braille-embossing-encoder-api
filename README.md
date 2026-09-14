@@ -71,6 +71,8 @@ docker compose up --exit-code-from verify verify   # 一次性验收：跑完即
 
 `verify` 服务等待 `api` 健康后执行验收套件（编码金样、数字段状态切换、0–9 映射、空文本/超长/非法字符 422、畸形 JSON 400 等），全部通过则以 0 退出，否则非 0。
 
+两个服务由同一个多阶段 Dockerfile 构建：共享的 `build` 阶段编译出两个二进制，`server`/`verify` 两个 target 分别产出 `braille-api:local` 与 `braille-verify:local` 两个独立镜像，并行构建共享缓存且互不覆盖。
+
 ## 结构
 
 ```
