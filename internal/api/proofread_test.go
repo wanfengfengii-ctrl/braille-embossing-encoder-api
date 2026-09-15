@@ -160,6 +160,65 @@ func TestProofreadBoundaryCellValues(t *testing.T) {
 	}
 }
 
+// TestProofreadEmptyValuesAre422 distinguishes empty values (semantic
+// 422) from type errors (400): empty/null text and a missing/null
+// observed_cells are empty values; an empty array is a legal (if
+// content-free) readback and aligns with everything missing.
+func TestProofreadEmptyValuesAre422(t *testing.T) {
+	cases := map[string]string{
+		"empty text":       `{"text":"","observed_cells":[1]}`,
+		"null text":        `{"text":null,"observed_cells":[1]}`,
+		"missing text":     `{"observed_cells":[1]}`,
+		"missing observed": `{"text":"A"}`,
+		"null observed":    `{"text":"A","observed_cells":null}`,
+		"both empty":       `{"text":"","observed_cells":[]}`,
+		"both missing":     `{}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := postProofread(t, body)
+			if w.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("got %d %s, want 422", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestProofreadEmptyArrayIsLegalReadback: observed_cells [] is not a
+// missing field — it is a present, empty readback and yields the
+// all-missing alignment (200), not a 422.
+func TestProofreadEmptyArrayIsLegalReadback(t *testing.T) {
+	w := postProofread(t, `{"text":"A","observed_cells":[]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d %s, want 200", w.Code, w.Body.String())
+	}
+	resp := decodeProofread(t, w)
+	if resp.Matched != 0 || resp.EditCount != 1 || len(resp.Discrepancies) != 1 ||
+		resp.Discrepancies[0].Category != "missing" {
+		t.Fatalf("got %+v", resp)
+	}
+}
+
+// TestProofreadTrailingSecondSegment400: a valid object followed by a
+// second JSON value is a malformed whole request, never a partial
+// proofread result.
+func TestProofreadTrailingSecondSegment400(t *testing.T) {
+	bodies := map[string]string{
+		"second object":  `{"text":"A","observed_cells":[1]}{}`,
+		"trailing array": `{"text":"A","observed_cells":[1]}[]`,
+		"trailing token": `{"text":"A","observed_cells":[1]}true`,
+		"trailing junk":  `{"text":"A","observed_cells":[1]}xyz`,
+		"two numbers":    `{"text":"A","observed_cells":[1]}42`,
+		"duplicate body": `{"text":"A","observed_cells":[1]}{"text":"B","observed_cells":[3]}`,
+	}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			w := postProofread(t, body)
+			assertProofreadError(t, w, http.StatusBadRequest, "bad_request")
+		})
+	}
+}
+
 // TestProofreadMalformedJSON400 rejects bodies that are not a legal JSON
 // object with the right field types.
 func TestProofreadMalformedJSON400(t *testing.T) {

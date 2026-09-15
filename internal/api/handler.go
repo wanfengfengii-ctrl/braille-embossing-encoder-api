@@ -4,6 +4,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -48,13 +49,37 @@ func healthz(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
+// badRequest replies with the shared 400 envelope for an unparseable or
+// wrongly typed request body.
+func badRequest(c *gin.Context, message string) {
+	c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+		"code":    "bad_request",
+		"message": message,
+	}})
+}
+
+// decodeOneJSON reads the request body and decodes exactly one JSON value
+// into dst. Unlike a single decoder.Decode call, it rejects a body with
+// trailing content — e.g. a valid object followed by a second object — so
+// such "two-segment" bodies are reported as malformed (400) rather than
+// silently using the first value. A JSON null for a struct-typed dst is a
+// type error; unknown fields are tolerated as before.
+func decodeOneJSON(c *gin.Context, dst any) bool {
+	raw, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		badRequest(c, "request body could not be read")
+		return false
+	}
+	if err := json.Unmarshal(raw, dst); err != nil {
+		return false
+	}
+	return true
+}
+
 func encode(c *gin.Context) {
 	var req encodeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"code":    "bad_request",
-			"message": `request body must be a JSON object with a string field "text"`,
-		}})
+	if !decodeOneJSON(c, &req) {
+		badRequest(c, `request body must be a JSON object with a string field "text"`)
 		return
 	}
 	items, encErr := braille.Encode(req.Text)
@@ -70,11 +95,8 @@ func encode(c *gin.Context) {
 // packs the records into preview lines.
 func layout(c *gin.Context) {
 	var req layoutRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"code":    "bad_request",
-			"message": `request body must be a JSON object with a string field "text" and an integer field "cells_per_line"`,
-		}})
+	if !decodeOneJSON(c, &req) {
+		badRequest(c, `request body must be a JSON object with a string field "text" and an integer field "cells_per_line"`)
 		return
 	}
 	items, encErr := braille.Encode(req.Text)
@@ -112,21 +134,15 @@ func parseCellsPerLine(raw json.RawMessage) (int, bool) {
 // field, overlong input, or an out-of-range index.
 func proofread(c *gin.Context) {
 	var req proofreadRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"code":    "bad_request",
-			"message": `request body must be a JSON object with a string field "text" and an integer array field "observed_cells"`,
-		}})
+	if !decodeOneJSON(c, &req) {
+		badRequest(c, `request body must be a JSON object with a string field "text" and an integer array field "observed_cells"`)
 		return
 	}
 	// Field-shape errors (observed_cells not an array of integers) make
 	// the object itself illegal: 400, before any semantic 422 checks.
 	parsed, ok := parseObservedCells(req.ObservedCells)
 	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-			"code":    "bad_request",
-			"message": `request body must be a JSON object with a string field "text" and an integer array field "observed_cells"`,
-		}})
+		badRequest(c, `request body must be a JSON object with a string field "text" and an integer array field "observed_cells"`)
 		return
 	}
 	result, domainErr := braille.Proofread(req.Text, parsed)

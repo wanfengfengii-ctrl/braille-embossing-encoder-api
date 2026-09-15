@@ -118,6 +118,21 @@ func TestEncodeMalformedJSON400(t *testing.T) {
 	}
 }
 
+// TestEncodeTrailingSecondSegment400: a valid object followed by a second
+// JSON value is a malformed whole request, not a usable first segment.
+func TestEncodeTrailingSecondSegment400(t *testing.T) {
+	for _, body := range []string{
+		`{"text":"A"}{}`,
+		`{"text":"A"}[]`,
+		`{"text":"A"}"x"`,
+		`{"text":"A"}42`,
+		`{"text":"A"} true`,
+	} {
+		w := postEncode(t, body)
+		assertError(t, w, http.StatusBadRequest, "bad_request", nil)
+	}
+}
+
 // TestLayoutGoldenBody pins the exact preview body for a mixed input at
 // width 2: the double-cell "b" wraps unsplit, the explicit newline ends
 // line 1, and the number run "12" splits across lines 2-3 without
@@ -270,6 +285,19 @@ func TestLayoutTextErrorBeatsWidthError(t *testing.T) {
 
 func TestLayoutMalformedJSON400(t *testing.T) {
 	for _, body := range []string{`{not json`, `{"text":42,"cells_per_line":10}`, `["a"]`} {
+		w := postLayout(t, body)
+		assertLayoutError(t, w, http.StatusBadRequest, "bad_request")
+	}
+}
+
+// TestLayoutTrailingSecondSegment400: a valid object followed by a second
+// JSON value is a malformed whole request, not a usable first segment.
+func TestLayoutTrailingSecondSegment400(t *testing.T) {
+	for _, body := range []string{
+		`{"text":"ab","cells_per_line":10}{}`,
+		`{"text":"ab","cells_per_line":10}[]`,
+		`{"text":"ab","cells_per_line":10}7`,
+	} {
 		w := postLayout(t, body)
 		assertLayoutError(t, w, http.StatusBadRequest, "bad_request")
 	}

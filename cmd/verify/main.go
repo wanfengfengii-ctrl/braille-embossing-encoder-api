@@ -88,7 +88,9 @@ func main() {
 	checkProofreadUnexpected()
 	checkProofreadSkipsNewlines()
 	checkProofreadValidation()
+	checkProofreadEmptyValues()
 	checkProofreadMalformedJSON()
+	checkProofreadTrailingSegment()
 	checkDeterministicResponses()
 
 	if failures > 0 {
@@ -542,6 +544,69 @@ func checkProofreadMalformedJSON() {
 			resp.StatusCode == 400 && eb.Code == "bad_request" && !leak,
 			fmt.Sprintf("got %d %s", resp.StatusCode, body))
 	}
+}
+
+// checkProofreadEmptyValues verifies the empty-value contract: empty or
+// null text and a missing or null observed_cells are semantic 422s, while
+// a present empty array is a legal (content-free) readback that aligns
+// with every record missing.
+func checkProofreadEmptyValues() {
+	cases := map[string]struct {
+		payload string
+		code    string
+		status  int
+	}{
+		"empty text":       {`{"text":"","observed_cells":[1]}`, "empty_text", 422},
+		"null text":        {`{"text":null,"observed_cells":[1]}`, "empty_text", 422},
+		"missing text":     {`{"observed_cells":[1]}`, "empty_text", 422},
+		"missing observed": {`{"text":"A"}`, "invalid_observed_cells", 422},
+		"null observed":    {`{"text":"A","observed_cells":null}`, "invalid_observed_cells", 422},
+		"both empty":       {`{"text":"","observed_cells":[]}`, "empty_text", 422},
+	}
+	for name, tc := range cases {
+		resp, body := do("POST", "/proofread", tc.payload)
+		eb, leak := decodeProofreadError(body)
+		pass("proofread empty value "+name,
+			resp.StatusCode == tc.status && eb.Code == tc.code && !leak,
+			fmt.Sprintf("got %d %s", resp.StatusCode, body))
+	}
+
+	// A present empty array is a legal (content-free) readback, not a
+	// missing field: all records are reported missing with 200.
+	resp, body := do("POST", "/proofread", `{"text":"A","observed_cells":[]}`)
+	pr, ok := decodeProofread(body)
+	good := resp.StatusCode == 200 && ok && pr.Matched == 0 && pr.EditCount == 1 &&
+		len(pr.Discrepancies) == 1 && pr.Discrepancies[0].Category == "missing"
+	pass("proofread empty array is legal readback", good, fmt.Sprintf("got %d %s", resp.StatusCode, body))
+}
+
+// checkProofreadTrailingSegment verifies a valid object followed by a
+// second JSON value is a malformed whole request (400), never a partial
+// result taken from the first segment; the old endpoints behave alike.
+func checkProofreadTrailingSegment() {
+	cases := map[string]string{
+		"second object":  `{"text":"A","observed_cells":[1]}{}`,
+		"trailing array": `{"text":"A","observed_cells":[1]}[]`,
+		"trailing token": `{"text":"A","observed_cells":[1]}true`,
+		"duplicate body": `{"text":"A","observed_cells":[1]}{"text":"B","observed_cells":[3]}`,
+	}
+	for name, payload := range cases {
+		resp, body := do("POST", "/proofread", payload)
+		eb, leak := decodeProofreadError(body)
+		pass("proofread trailing "+name+" -> 400",
+			resp.StatusCode == 400 && eb.Code == "bad_request" && !leak,
+			fmt.Sprintf("got %d %s", resp.StatusCode, body))
+	}
+
+	resp, body := do("POST", "/encode", `{"text":"A"}{}`)
+	pass("encode trailing second object -> 400",
+		resp.StatusCode == 400 && strings.Contains(string(body), "bad_request"),
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+
+	resp, body = do("POST", "/layout", `{"text":"ab","cells_per_line":10}[]`)
+	pass("layout trailing second array -> 400",
+		resp.StatusCode == 400 && strings.Contains(string(body), "bad_request"),
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
 }
 
 func intPtr(v int) *int { return &v }

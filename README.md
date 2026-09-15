@@ -133,10 +133,15 @@
 | 场景 | 状态码 | code |
 | --- | --- | --- |
 | 畸形 JSON、`text` 非字符串、`observed_cells` 不是整数数组（含 `null`/分数/指数/字符串元素） | `400` | `bad_request` |
-| 文本问题（空、超长、非法字符） | `422` | 与 `/encode` 相同，优先于回读错误 |
-| 缺字段或 `observed_cells: null` | `422` | `invalid_observed_cells` |
+| 合法 JSON 值后再追加第二段（如 `{...}{}`、尾随 token） | `400` | `bad_request`（整份请求视为畸形，不使用第一段） |
+| 文本为空串、`null` 或缺字段 | `422` | `empty_text`（空值是语义错误，不是类型错误） |
+| 文本含非法字符或超长 | `422` | 与 `/encode` 相同，优先于回读错误 |
+| `observed_cells` 缺字段或为 `null` | `422` | `invalid_observed_cells` |
+| `observed_cells` 为空数组 `[]` | `200` | 合法但空的回读，全部来源记录记为缺失 |
 | 超过 4000 个单元 | `422` | `invalid_observed_cells`，附带 `length` 与 `limit`（超长优先于越界值） |
 | 存在 0–63 之外的取值（含负整数、超 int64 的整数字面量） | `422` | `invalid_observed_cells`，附带首个非法位置 `index` 与可表示的 `value` |
+
+空值与类型错误的边界：`text` 为字符串时，`""` 与 `null` 都算空值（422，不是 400）；`observed_cells: null` 算空值（422），而 `[]` 是显式给出的空回读（200 全量缺失）。所有 `POST` 端点都只接受恰好一个 JSON 值——`/encode`、`/layout` 同样拒绝尾随第二段。
 
 ### `GET /healthz`
 
