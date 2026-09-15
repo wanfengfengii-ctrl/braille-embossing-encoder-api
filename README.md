@@ -90,6 +90,54 @@
 | 文本问题（空、超长、非法字符） | `422` | 与 `/encode` 相同 | 编码先行校验，不泄露局部排版结果 |
 | 畸形 JSON、`text` 非字符串 | `400` | `bad_request` | 与 `/encode` 相同 |
 
+### `POST /proofread`
+
+压印后复核：复用编码器从 `text` 生成来源记录（跳过不产生单元的换行记录），把设备回读掩码 `observed_cells` 与来源记录对齐。每条非换行记录的单元组（指示符加主体）是一个**不可拆分原子**：它可以完整匹配、吸收连续一或两个回读单元（单/双单元变更）、或一个回读单元也不吸收（缺失）；没有原子认领的回读单元记为意外压印。
+
+请求：`text` 同 `/encode`；`observed_cells` 为最多 4000 个整数，每个取值 0–63。
+
+```json
+{"text": "ab", "observed_cells": [1, 32, 7]}
+```
+
+对齐在全局做动态规划，路径选择次序为：
+
+1. 最小化插入、删除、替换总数（`edit_count`）；
+2. 最大化完整匹配数（`matched`）；
+3. 最少化意外压印单元数；
+4. 仍同分时，在最早的分歧处依次选择 **完整匹配 → 双单元变更 → 单单元变更 → 缺失 → 意外压印**。
+
+上例中 `a` 的单元组 `[32,1]` 只回读到 `[1]`（大写指示符漏压，单单元变更，一次删除）；`b` 的单元组 `[32,3]` 回读到 `[32,7]`（主体被替换，双单元变更，一次替换），成功 `200`：
+
+```json
+{"matched":0,"edit_count":2,"discrepancies":[
+  {"category":"single_change","source_index":0,"expected":[32,1],"observed":[1],"readback_offset":0},
+  {"category":"double_change","source_index":1,"expected":[32,3],"observed":[32,7],"readback_offset":1}
+]}
+```
+
+差异字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `category` | `missing`（缺失）、`single_change`（单单元变更）、`double_change`（双单元变更）、`unexpected`（意外压印） |
+| `source_index` | 原子所属来源字符下标；意外压印不属于任何字符，缺省 |
+| `expected` | 该原子的期望单元（一或两个）；意外压印为 `null` |
+| `observed` | 支撑该差异的回读单元：缺失为 `[]`，单单元变更/意外为一个，双单元变更为两个（恒为数组，不为 `null`） |
+| `readback_offset` | 首个回读单元在回读流中的偏移；缺失原子不消耗回读单元，缺省 |
+
+`discrepancies` 只列非完整匹配项并按对齐路径排序；完全一致时为 `[]` 且 `edit_count` 为 0。空回读（`[]`）会让每条非换行记录整体缺失，按每个期望单元计一次删除，例如 `"Ab\n12"` 共 6 次。
+
+校验（合法对象先校验 `text`，再按回读字段的固定次序报错，绝不返回部分对齐）：
+
+| 场景 | 状态码 | code |
+| --- | --- | --- |
+| 畸形 JSON、`text` 非字符串、`observed_cells` 不是整数数组（含 `null`/分数/指数/字符串元素） | `400` | `bad_request` |
+| 文本问题（空、超长、非法字符） | `422` | 与 `/encode` 相同，优先于回读错误 |
+| 缺字段或 `observed_cells: null` | `422` | `invalid_observed_cells` |
+| 超过 4000 个单元 | `422` | `invalid_observed_cells`，附带 `length` 与 `limit`（超长优先于越界值） |
+| 存在 0–63 之外的取值（含负整数、超 int64 的整数字面量） | `422` | `invalid_observed_cells`，附带首个非法位置 `index` 与可表示的 `value` |
+
 ### `GET /healthz`
 
 存活探针，返回 `200 {"status":"ok"}`。
@@ -109,7 +157,7 @@ API_PORT=9000 docker compose up api   # 宿主端口由 API_PORT 覆盖
 docker compose up --exit-code-from verify verify   # 一次性验收：跑完即退出并回传退出码
 ```
 
-`verify` 服务等待 `api` 健康后执行验收套件（编码金样、数字段状态切换、0–9 映射、空文本/超长/非法字符 422、畸形 JSON 400、排版金样、双单元字符临界折行、数字段跨自动行延续、连续/末尾换行空行、行宽 422、响应确定性等），全部通过则以 0 退出，否则非 0。
+`verify` 服务等待 `api` 健康后执行验收套件（编码金样、数字段状态切换、0–9 映射、空文本/超长/非法字符 422、畸形 JSON 400、排版金样、双单元字符临界折行、数字段跨自动行延续、连续/末尾换行空行、行宽 422、复核完全一致/漏前缀伴随替换/空回读全量缺失/意外压印/校验次序、响应确定性等），全部通过则以 0 退出，否则非 0。
 
 两个服务由同一个多阶段 Dockerfile 构建：共享的 `build` 阶段编译出两个二进制，`server`/`verify` 两个 target 分别产出 `braille-api:local` 与 `braille-verify:local` 两个独立镜像，并行构建共享缓存且互不覆盖。
 
@@ -118,6 +166,6 @@ docker compose up --exit-code-from verify verify   # 一次性验收：跑完即
 ```
 cmd/server    API 入口（PORT 环境变量，默认 8080）
 cmd/verify    一次性验收客户端（API_URL 环境变量）
-internal/braille  编码核心（校验 + 状态机）与排版装行
+internal/braille  编码核心（校验 + 状态机）、排版装行与回读核对（原子对齐动态规划）
 internal/api      Gin 路由与处理器
 ```

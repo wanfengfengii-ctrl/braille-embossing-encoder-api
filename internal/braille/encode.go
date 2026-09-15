@@ -69,6 +69,11 @@ type Error struct {
 	Limit       int    `json:"limit,omitempty"`
 	Min         int    `json:"min,omitempty"`
 	Max         int    `json:"max,omitempty"`
+	// Index and Value carry the offending position and value for an
+	// observed_cells entry outside 0-63; Index is an offset into that
+	// array, not a source code point index.
+	Index *int `json:"index,omitempty"`
+	Value int  `json:"value,omitempty"`
 }
 
 func (e *Error) Error() string { return e.Message }

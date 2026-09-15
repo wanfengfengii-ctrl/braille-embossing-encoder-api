@@ -29,6 +29,20 @@ type line struct {
 	Items     []item `json:"items"`
 }
 
+type discrepancy struct {
+	Category       string `json:"category"`
+	SourceIndex    *int   `json:"source_index"`
+	Expected       []int  `json:"expected"`
+	Observed       []int  `json:"observed"`
+	ReadbackOffset *int   `json:"readback_offset"`
+}
+
+type proofreadResponse struct {
+	Matched       int           `json:"matched"`
+	EditCount     int           `json:"edit_count"`
+	Discrepancies []discrepancy `json:"discrepancies"`
+}
+
 type errorBody struct {
 	Code        string `json:"code"`
 	SourceIndex *int   `json:"source_index"`
@@ -37,6 +51,8 @@ type errorBody struct {
 	Limit       int    `json:"limit"`
 	Min         int    `json:"min"`
 	Max         int    `json:"max"`
+	Index       *int   `json:"index"`
+	Value       int    `json:"value"`
 }
 
 var (
@@ -66,6 +82,13 @@ func main() {
 	checkLayoutLineWidth()
 	checkLayoutTextErrors()
 	checkLayoutMalformedJSON()
+	checkProofreadExact()
+	checkProofreadDroppedPrefixWithChange()
+	checkProofreadEmptyReadbackAllMissing()
+	checkProofreadUnexpected()
+	checkProofreadSkipsNewlines()
+	checkProofreadValidation()
+	checkProofreadMalformedJSON()
 	checkDeterministicResponses()
 
 	if failures > 0 {
@@ -358,8 +381,173 @@ func checkLayoutMalformedJSON() {
 	pass("layout truncated JSON -> 400", resp.StatusCode == 400, fmt.Sprintf("got %d %s", resp.StatusCode, body))
 }
 
-// checkDeterministicResponses replays the encode and layout goldens and
-// requires byte-identical bodies.
+// checkProofreadExact verifies a readback identical to the encoded stream
+// (newline skipped) reports every atom matched with zero edits and no
+// discrepancies.
+func checkProofreadExact() {
+	resp, body := do("POST", "/proofread", `{"text":"A1b 23\nZz0","observed_cells":[1,60,1,32,3,0,60,3,9,53,32,53,60,26]}`)
+	pr, ok := decodeProofread(body)
+	good := resp.StatusCode == 200 && ok &&
+		pr.Matched == 9 && pr.EditCount == 0 && len(pr.Discrepancies) == 0 &&
+		bytes.Contains(body, []byte(`"discrepancies":[]`))
+	pass("proofread exact readback -> all matched", good, fmt.Sprintf("got %d %s", resp.StatusCode, body))
+}
+
+// checkProofreadDroppedPrefixWithChange verifies the named scenario: a
+// dropped capital prefix is a single-cell change (one deletion), while the
+// next atom keeps its indicator but has its body substituted (a
+// double-cell change). Discrepancies follow the path with readback offsets.
+func checkProofreadDroppedPrefixWithChange() {
+	resp, body := do("POST", "/proofread", `{"text":"ab","observed_cells":[1,32,7]}`)
+	pr, ok := decodeProofread(body)
+	want := []discrepancy{
+		{
+			Category:       "single_change",
+			SourceIndex:    intPtr(0),
+			Expected:       []int{32, 1},
+			Observed:       []int{1},
+			ReadbackOffset: intPtr(0),
+		},
+		{
+			Category:       "double_change",
+			SourceIndex:    intPtr(1),
+			Expected:       []int{32, 3},
+			Observed:       []int{32, 7},
+			ReadbackOffset: intPtr(1),
+		},
+	}
+	good := resp.StatusCode == 200 && ok &&
+		pr.Matched == 0 && pr.EditCount == 2 && reflect.DeepEqual(pr.Discrepancies, want)
+	pass("proofread dropped prefix beside substitution", good, fmt.Sprintf("got %d %s", resp.StatusCode, body))
+}
+
+// checkProofreadEmptyReadbackAllMissing verifies an empty readback reports
+// every non-newline record missing (one deletion per expected cell), with
+// source indexes but no readback offsets, and the newline record skipped.
+func checkProofreadEmptyReadbackAllMissing() {
+	resp, body := do("POST", "/proofread", `{"text":"Ab\n12","observed_cells":[]}`)
+	pr, ok := decodeProofread(body)
+	want := []discrepancy{
+		{Category: "missing", SourceIndex: intPtr(0), Expected: []int{1}, Observed: []int{}},
+		{Category: "missing", SourceIndex: intPtr(1), Expected: []int{32, 3}, Observed: []int{}},
+		{Category: "missing", SourceIndex: intPtr(3), Expected: []int{60, 1}, Observed: []int{}},
+		{Category: "missing", SourceIndex: intPtr(4), Expected: []int{3}, Observed: []int{}},
+	}
+	good := resp.StatusCode == 200 && ok &&
+		pr.Matched == 0 && pr.EditCount == 6 && reflect.DeepEqual(pr.Discrepancies, want)
+	for _, d := range pr.Discrepancies {
+		if d.ReadbackOffset != nil {
+			good = false
+		}
+	}
+	pass("proofread empty readback -> all missing", good, fmt.Sprintf("got %d %s", resp.StatusCode, body))
+}
+
+// checkProofreadUnexpected verifies stray embossing is reported with no
+// source index, a null expected list, and the correct readback offset.
+func checkProofreadUnexpected() {
+	resp, body := do("POST", "/proofread", `{"text":"A","observed_cells":[9,1,8]}`)
+	pr, ok := decodeProofread(body)
+	want := []discrepancy{
+		{Category: "unexpected", Expected: nil, Observed: []int{9}, ReadbackOffset: intPtr(0)},
+		{Category: "unexpected", Expected: nil, Observed: []int{8}, ReadbackOffset: intPtr(2)},
+	}
+	good := resp.StatusCode == 200 && ok &&
+		pr.Matched == 1 && pr.EditCount == 2 && reflect.DeepEqual(pr.Discrepancies, want)
+	pass("proofread unexpected embossing with offsets", good,
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+}
+
+// checkProofreadSkipsNewlines verifies newline records produce no atoms
+// and no discrepancies.
+func checkProofreadSkipsNewlines() {
+	resp, body := do("POST", "/proofread", `{"text":"A\nB\n","observed_cells":[1,3]}`)
+	pr, ok := decodeProofread(body)
+	good := resp.StatusCode == 200 && ok &&
+		pr.Matched == 2 && pr.EditCount == 0 && len(pr.Discrepancies) == 0
+	pass("proofread skips newline records", good, fmt.Sprintf("got %d %s", resp.StatusCode, body))
+}
+
+// checkProofreadValidation verifies the validation contract: text first,
+// then the observed_cells precedence (missing, overlong, first illegal
+// index), and the 0/63 boundaries.
+func checkProofreadValidation() {
+	// Text errors reuse the /encode codes and win over readback errors.
+	resp, body := do("POST", "/proofread", `{"text":"","observed_cells":[]}`)
+	eb, leak := decodeProofreadError(body)
+	pass("proofread empty text -> 422 empty_text",
+		resp.StatusCode == 422 && eb.Code == "empty_text" && !leak,
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+
+	resp, body = do("POST", "/proofread", `{"text":"ab汉","observed_cells":[64]}`)
+	eb, leak = decodeProofreadError(body)
+	pass("proofread invalid char beats observed error",
+		resp.StatusCode == 422 && eb.Code == "invalid_character" &&
+			eb.SourceIndex != nil && *eb.SourceIndex == 2 && !leak,
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+
+	// Missing observed_cells field -> 422 invalid_observed_cells.
+	resp, body = do("POST", "/proofread", `{"text":"A"}`)
+	eb, leak = decodeProofreadError(body)
+	pass("proofread missing observed_cells -> 422",
+		resp.StatusCode == 422 && eb.Code == "invalid_observed_cells" && !leak,
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+
+	// Out-of-range value with the first illegal index.
+	resp, body = do("POST", "/proofread", `{"text":"A","observed_cells":[1,64]}`)
+	eb, leak = decodeProofreadError(body)
+	pass("proofread cell 64 -> 422 with index 1",
+		resp.StatusCode == 422 && eb.Code == "invalid_observed_cells" &&
+			eb.Index != nil && *eb.Index == 1 && eb.Value == 64 && !leak,
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+
+	resp, body = do("POST", "/proofread", `{"text":"A","observed_cells":[-1]}`)
+	eb, _ = decodeProofreadError(body)
+	pass("proofread cell -1 -> 422 with index 0",
+		resp.StatusCode == 422 && eb.Code == "invalid_observed_cells" &&
+			eb.Index != nil && *eb.Index == 0 && eb.Value == -1,
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+
+	// Overlong beats a later illegal value.
+	overlong := `{"text":"A","observed_cells":[` + strings.Repeat("0,", 4000) + `64]}`
+	resp, body = do("POST", "/proofread", overlong)
+	eb, leak = decodeProofreadError(body)
+	pass("proofread overlong observed_cells -> 422 length beats value",
+		resp.StatusCode == 422 && eb.Code == "invalid_observed_cells" &&
+			eb.Length == 4001 && eb.Limit == 4000 && eb.Index == nil && !leak,
+		fmt.Sprintf("got %d (body truncated) %.120s", resp.StatusCode, body))
+
+	// Boundary values 0 and 63 are legal.
+	resp, body = do("POST", "/proofread", `{"text":"  ","observed_cells":[0,63]}`)
+	pass("proofread cell boundaries 0 and 63 -> 200", resp.StatusCode == 200,
+		fmt.Sprintf("got %d %s", resp.StatusCode, body))
+}
+
+// checkProofreadMalformedJSON verifies malformed JSON and field-type
+// errors are 400, distinct from the 422 semantic validations.
+func checkProofreadMalformedJSON() {
+	cases := map[string]string{
+		"malformed":       `{not json`,
+		"text nonstring":  `{"text":42,"observed_cells":[1]}`,
+		"cells string":    `{"text":"A","observed_cells":"[1]"}`,
+		"cells scalar":    `{"text":"A","observed_cells":1}`,
+		"cells null elem": `{"text":"A","observed_cells":[null]}`,
+		"cells fraction":  `{"text":"A","observed_cells":[1.5]}`,
+		"cells exponent":  `{"text":"A","observed_cells":[1e1]}`,
+	}
+	for name, payload := range cases {
+		resp, body := do("POST", "/proofread", payload)
+		eb, leak := decodeProofreadError(body)
+		pass("proofread "+name+" -> 400",
+			resp.StatusCode == 400 && eb.Code == "bad_request" && !leak,
+			fmt.Sprintf("got %d %s", resp.StatusCode, body))
+	}
+}
+
+func intPtr(v int) *int { return &v }
+
+// checkDeterministicResponses replays the encode, layout and proofread
+// goldens and requires byte-identical bodies.
 func checkDeterministicResponses() {
 	for _, tc := range []struct {
 		name string
@@ -368,6 +556,7 @@ func checkDeterministicResponses() {
 	}{
 		{"encode golden", "/encode", `{"text":"A1b 23\nZz0"}`},
 		{"layout golden", "/layout", `{"text":"Ab\n12","cells_per_line":2}`},
+		{"proofread golden", "/proofread", `{"text":"ab","observed_cells":[1,32,7]}`},
 	} {
 		resp1, body1 := do("POST", tc.path, tc.body)
 		resp2, body2 := do("POST", tc.path, tc.body)
@@ -464,6 +653,44 @@ func decodeLayoutError(body []byte) (errorBody, bool) {
 	}
 	_ = json.Unmarshal(body, &env)
 	return env.Err, hasLines
+}
+
+// decodeProofread extracts the alignment of a proofread success body. It
+// reports ok only when the body carries a "matched" field.
+func decodeProofread(body []byte) (proofreadResponse, bool) {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return proofreadResponse{}, false
+	}
+	if _, isResult := raw["matched"]; !isResult {
+		return proofreadResponse{}, false
+	}
+	var pr proofreadResponse
+	if json.Unmarshal(body, &pr) != nil {
+		return proofreadResponse{}, false
+	}
+	if pr.Discrepancies == nil {
+		pr.Discrepancies = []discrepancy{}
+	}
+	for i := range pr.Discrepancies {
+		if pr.Discrepancies[i].Observed == nil {
+			pr.Discrepancies[i].Observed = []int{}
+		}
+	}
+	return pr, true
+}
+
+// decodeProofreadError extracts the error object and reports whether the
+// body leaked a partial proofread result.
+func decodeProofreadError(body []byte) (errorBody, bool) {
+	var raw map[string]json.RawMessage
+	_ = json.Unmarshal(body, &raw)
+	_, hasResult := raw["discrepancies"]
+	var env struct {
+		Err errorBody `json:"error"`
+	}
+	_ = json.Unmarshal(body, &env)
+	return env.Err, hasResult
 }
 
 func pass(name string, ok bool, detail string) {
